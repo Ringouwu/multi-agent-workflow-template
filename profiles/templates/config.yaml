@@ -1,0 +1,34 @@
+# Profile 配置模板（泛用版）
+# 复制到 ~/.hermes/profiles/<role>/config.yaml 并按需修改
+#
+# 注意：
+# 1. 所有 profile 用同一家模型（实测 ark codex_responses 模式在 kanban worker 报 HTTP 400，
+#    推荐 OpenAI 兼容 chat_completions 的 provider）
+# 2. 每个 profile 有独立 .env（~/.hermes/profiles/<role>/.env），需手动加 API key
+
+model:
+  default: <YOUR_MODEL>          # 例如 deepseek-v4-pro
+  provider: <YOUR_PROVIDER>      # 例如 deepseek
+  supports_vision: false
+
+agent:
+  max_turns: 50                  # 按角色调整：architect 40 / builder 80 / auditor 50
+  verbose: false
+
+# 工具集按角色权限分配（最小权限原则）
+platform_toolsets:
+  cli:
+    - file
+    - skills
+    - memory
+    - kanban
+    # - web          # architect 需要（调研先行）；pm 需要；builder 可选
+    # - terminal     # 仅 builder 需要（编译/运行）；auditor 只读不开
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+
+display:
+  compact: false
+  streaming: true
