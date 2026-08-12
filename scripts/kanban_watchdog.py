@@ -113,13 +113,19 @@ def get_task_deps(board, task_id):
     out = kanban(board, "show", task_id)
     if not out:
         return []
-    # 解析 "Depends on:" 行
+    # 解析父任务行
+    # 格式可能是:
+    #   parents:   t_xxx, t_yyy
+    #   Depends on: t_xxx
+    #   depends on: t_xxx
     deps = []
+    import re
     for line in out.split("\n"):
-        if "Depends on:" in line or "depends on:" in line:
-            # 提取 t_xxx 格式的 ID
-            import re
-            deps = re.findall(r't_[a-f0-9]+', line)
+        line_stripped = line.strip()
+        if (line_stripped.startswith("parents:") or
+            line_stripped.startswith("Depends on:") or
+            line_stripped.startswith("depends on:")):
+            deps = re.findall(r't_[a-f0-9]+', line_stripped)
             break
     return deps
 
@@ -465,10 +471,19 @@ def run_build_check(board, tasks, state):
 
 
 def _create_build_fix_task(board, exec_task, error_msg, build_name, tasks, state):
-    """编译失败 → 创建编译修复任务并重新走修复流程"""
-    # 找对应的 auditor blocked 任务
-    blocked_auditors = [t for t in tasks
-                        if t["assignee"] == "auditor" and t["status"] == "blocked"]
+    """编译失败 → 创建编译修复任务并重新走修复流程
+
+    只 link 到和这个修复执行有直接依赖关系的 auditor（即 auditor 依赖这个 exec_task），
+    不能 link 到所有 blocked auditor（会把无关历史任务的 auditor 也扯上）。
+    """
+    # 找依赖这个修复执行任务的 blocked auditor（auditor 是 exec_task 的子任务）
+    # 即 auditor 的 parents 里包含 exec_task.id
+    linked_auditors = []
+    for t in tasks:
+        if t["assignee"] == "auditor" and t["status"] == "blocked":
+            deps = get_task_deps(board, t["id"])
+            if exec_task["id"] in deps:
+                linked_auditors.append(t)
 
     fix_title = f"编译修复：{exec_task['title'].replace('修复执行：', '')}"
 
@@ -499,11 +514,11 @@ def _create_build_fix_task(board, exec_task, error_msg, build_name, tasks, state
     )
 
     if fix_id:
-        # 链接到 auditor 任务（auditor 等编译修复完成才能复审）
-        if blocked_auditors:
-            link_tasks(board, fix_id, blocked_auditors[0]["id"])
+        # 链接到对应的 auditor 任务（auditor 等编译修复完成才能复审）
+        for auditor in linked_auditors:
+            link_tasks(board, fix_id, auditor["id"])
 
-        print(f"       已创建编译修复任务: {fix_id}")
+        print(f"       已创建编译修复任务: {fix_id}（关联 {len(linked_auditors)} 个 auditor）")
     else:
         print(f"       ✗ 创建编译修复任务失败")
 
@@ -622,6 +637,19 @@ def run_check(board):
     state.setdefault("completed_tasks", [])
     state.setdefault("notified_completion", False)
     tasks = list_tasks(board)
+
+    # 首次运行 baseline：把当前所有已完成的修复执行任务标记为"已检查"
+    # 避免回溯历史任务（历史任务完成时的代码状态和现在不一样，编译验证无意义）
+    if not state.get("_baseline_done"):
+        history_exec = [t["id"] for t in tasks
+                        if t["assignee"] == "builder"
+                        and "修复执行" in t["title"]
+                        and t["status"] == "done"
+                        and t["id"] not in state["build_checked_exec_ids"]]
+        if history_exec:
+            state["build_checked_exec_ids"].extend(history_exec)
+            print(f"[初始化] 标记 {len(history_exec)} 个历史修复执行任务为已检查")
+        state["_baseline_done"] = True
 
     if not tasks:
         print(f"[INFO] 看板 {board} 无任务")
