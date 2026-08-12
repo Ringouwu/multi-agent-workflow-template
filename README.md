@@ -93,21 +93,20 @@ Watchdog 桥接逻辑（自动执行，不花 LLM 钱）：
 
 **涉及认证头/密钥的判断，用字节级验证**（读原始字节查 `%s` / `\r\n`），不要只信显示内容。
 
-### 4. Auditor 防放水（三重保障）
+### 4. Auditor 防放水（双重保障）
 
 **问题**：Auditor 复审时可能只读代码不编译，明明编译失败却说"全部通过"。
 - 根因：静态读代码发现不了依赖配置错误、API 版本不兼容等编译期问题
 - 实际案例：v2 复审 auditor 说"3 个问题全是误报"，但 gradle 编译失败
 
-**解决（三重保障）**：
+**解决（双重保障）**：
 
 | 层级 | 措施 | 谁来做 | 状态 |
 |------|------|--------|------|
-| 流程层 | 编译前置验证：watchdog 在送 auditor 复审前先跑构建，失败直接打回 builder | watchdog 脚本（`--enable-build-check`） | 可选，实验性 |
 | 角色层 | auditor 模板 SOUL.md 明确要求「先编译再审计，编译失败直接 P0」 | 编排者配置 | 默认启用 |
 | 最终门 | 流水线全部完成后，Orchestrator 自己再跑一次编译验证 | 编排者 | 流程约定 |
 
-> 💡 编译验证的**流程层**现在是可选功能：核心思路有效，但多构建工具检测等边缘情况还在验证中。**角色层**（auditor SOUL 模板）和**最终门**（编排者自查）是默认生效的，两者已经能覆盖绝大多数放水场景。
+> 💡 核心思路：**LLM 审计会放水，编译器不会**。代码类项目无论用什么流程，最终必须以"能否构建通过"为准。曾尝试在 watchdog 里加自动化编译门禁，但因构建工具检测等边缘情况复杂、易引入新 bug，已移除——改用 auditor 角色约束 + 编排者最终验证两道保险。
 
 ## 快速开始（新项目）
 
@@ -163,8 +162,6 @@ echo "<YOUR_API_KEY_ENV>=sk-..." >> ~/.hermes/profiles/<role>/.env
 
 `scripts/kanban_watchdog.py` 是流水线的**必要补充**，解决了多个原生 kanban 的断链问题：
 
-**核心功能（默认启用，稳定）：**
-
 | 功能 | 解决什么问题 |
 |---|---|
 | 🚀 **阻塞启动** | auditor block 时创建的修复方案任务，会把 auditor 设为父依赖 → 子任务永远无法 promote（父任务是 blocked 不是 done）。watchdog 自动解绑 + 启动。 |
@@ -172,25 +169,15 @@ echo "<YOUR_API_KEY_ENV>=sk-..." >> ~/.hermes/profiles/<role>/.env
 | 🔄 **自动复审** | builder 修复执行 done 后，blocked 的 auditor 不会自动 unblock（即使父依赖全 done）。watchdog 检测到后自动 unblock 进入复审。 |
 | ✅ **完成汇报** | 看板全部 done 时自动发桌面通知，不用手动来问「做完了吗」。 |
 
-**可选功能（实验性，需手动开启）：**
-
-| 功能 | 说明 |
-|---|---|
-| 🔨 **编译前置验证** | auditor 复审可能放水（只读代码不编译，明明编译失败却说通过）。启用后 watchdog 在送复审前先跑构建命令，失败直接打回 builder，省 LLM token。用 `--enable-build-check` 开启。 |
-
-> ⚠️ 编译验证是实验性功能：自动检测构建工具（Gradle/Cargo/Go/Make/CMake/npm/Python），未检测到构建工具的项目自动跳过。建议先用默认模式跑通流程，确认稳定后再按需开启。
-
 **部署方式（cron，推荐）**：
 ```bash
 # 每个看板加一条 cron，每分钟跑一次（用完即走，几乎不占资源）
 * * * * * /usr/bin/python3 /path/to/scripts/kanban_watchdog.py --board <your-board> >> ~/.hermes/kanban-watchdog/cron.log 2>&1
-
-# 如需启用编译前置验证（实验性），在命令末尾加 --enable-build-check
 ```
 
 **守护进程模式**（不推荐，cron 更稳）：
 ```bash
-python3 scripts/kanban_watchdog.py --board <your-board> --daemon --interval 60 [--enable-build-check]
+python3 scripts/kanban_watchdog.py --board <your-board> --daemon --interval 60
 ```
 
 > 资源占用（cron 模式）：内存 ~10MB × 每次运行 <1 秒，平时 0 占用。硬盘可忽略。
@@ -214,7 +201,7 @@ multi-agent-workflow-template/
 │   └── examples/          # 具体项目示例（嵌入式等）
 ├── scripts/
 │   ├── start_project.sh   # 一键启动新项目（自动部署 watchdog cron）
-│   └── kanban_watchdog.py # 看板守护：阻塞启动 + 返工桥接 + 自动复审 + 完成通知（编译验证可选）
+│   └── kanban_watchdog.py # 看板守护：阻塞启动 + 返工桥接 + 自动复审 + 完成通知
 └── docs/
     ├── kanban-blocked-repair-deadlock.md   # 返工死锁完整调试复盘（7 个 bug + 预防清单）
     └── android-compose-build-pitfalls.md   # Android Compose 构建踩坑（领域特定参考）

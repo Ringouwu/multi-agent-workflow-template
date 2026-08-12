@@ -8,11 +8,8 @@ Kanban Watchdog — 多 Agent 流水线守护脚本
 3. 自动复审：修复执行 done → 自动 unblock auditor 进入复审
 4. 完成汇报：看板全部 done → 发桌面通知
 
-可选功能（实验性，需手动开启）：
-A. 编译前置验证：修复执行 done → 自动跑构建命令，失败直接建修复任务
-
 用法:
-    python3 kanban_watchdog.py --board <board-slug> [--daemon] [--interval 60] [--enable-build-check]
+    python3 kanban_watchdog.py --board <board-slug> [--daemon] [--interval 60]
 
 设计：纯脚本，不花 LLM 钱。
 - 方式 A（cron）：每分钟跑一次，--once（默认）
@@ -332,203 +329,12 @@ def check_repair_bridge(board, tasks, state):
     return bridged
 
 
-# ========== 构建工具检测（通用） ==========
+# ========== 功能 3：自动复审 ==========
 
-# 支持的构建工具：(检测文件, 构建命令, 友好名称)
-BUILD_TOOLS = [
-    # Android / JVM
-    ("gradlew", ["{gradlew}", "assembleDebug"], "Gradle (Android debug)"),
-    ("build.gradle.kts", ["gradle", "assembleDebug"], "Gradle (Kotlin DSL)"),
-    ("build.gradle", ["gradle", "build"], "Gradle (Groovy DSL)"),
-    # Rust
-    ("Cargo.toml", ["cargo", "build"], "Cargo (Rust)"),
-    # Go
-    ("go.mod", ["go", "build", "./..."], "Go build"),
-    # C/C++
-    ("Makefile", ["make", "-j4"], "Make"),
-    ("CMakeLists.txt", ["sh", "-c", "mkdir -p build && cd build && cmake .. && make -j4"], "CMake"),
-    # JS/TS
-    ("package.json", ["npm", "run", "build"], "npm build"),
-    # Python (语法检查 + 测试)
-    ("pyproject.toml", ["python", "-m", "py_compile", "**/*.py"], "Python syntax check"),
-    ("setup.py", ["python", "-m", "py_compile", "**/*.py"], "Python syntax check"),
-]
-
-
-def find_project_dir(board):
-    """自动检测项目源码目录"""
-    candidates = [
-        Path.home() / ".hermes" / "workspace" / board / "src",
-        Path.home() / ".hermes" / "workspace" / board,
-        Path.home() / "projects" / board,
-    ]
-    for c in candidates:
-        if c.exists() and c.is_dir():
-            # 检查这个目录或其子目录有没有构建工具标记
-            for marker, _, _ in BUILD_TOOLS:
-                if (c / marker).exists():
-                    return c
-                # 检查 src/ 子目录
-                if (c / "src" / marker).exists():
-                    return c / "src"
-                # 检查 app/ 子目录
-                if (c / "app" / marker).exists():
-                    return c
-    return None
-
-
-def detect_build_tool(project_dir):
-    """
-    检测项目使用的构建工具。
-    返回 (构建命令列表, 工具名称) 或 (None, None)
-    """
-    for marker, cmd_template, name in BUILD_TOOLS:
-        marker_path = project_dir / marker
-        if marker_path.exists():
-            # 特殊处理 gradlew
-            if marker == "gradlew":
-                cmd = [str(marker_path), "assembleDebug"]
-                return cmd, name
-            # 其他直接用模板
-            cmd = list(cmd_template)
-            return cmd, name
-    return None, None
-
-
-# ========== 功能 2B：修复完成自动复审 ==========
-
-def run_build_check(board, tasks, state):
-    """
-    builder 修复执行 done 后、unblock auditor 之前，先跑一遍编译验证。
-    编译失败 → 直接创建 P0 修复任务，不浪费 auditor token。
-    编译成功 → 正常进入复审。
-
-    自动检测构建工具：Gradle / Cargo / Go / Make / CMake / npm / Python 等。
-    找不到构建工具则跳过（视为通过，不阻塞）。
-
-    返回：(编译是否成功, 是否做了操作)
-    """
-    if "build_checked_exec_ids" not in state:
-        state["build_checked_exec_ids"] = []
-
-    # 找最近完成的 builder 修复执行任务（还没编译检查过的）
-    exec_tasks = [t for t in tasks
-                  if t["assignee"] == "builder"
-                  and "修复执行" in t["title"]
-                  and t["status"] == "done"
-                  and t["id"] not in state["build_checked_exec_ids"]]
-
-    if not exec_tasks:
-        return True, 0
-
-    # 找项目目录
-    project_dir = find_project_dir(board)
-    if not project_dir:
-        print(f"[WARN] 找不到项目源码目录，跳过编译验证")
-        return True, 0
-
-    # 检测构建工具
-    build_cmd, build_name = detect_build_tool(project_dir)
-    if not build_cmd:
-        print(f"[WARN] 未检测到构建工具（目录: {project_dir}），跳过编译验证")
-        return True, 0
-
-    acted = 0
-    all_ok = True
-
-    for exec_task in exec_tasks:
-        state["build_checked_exec_ids"].append(exec_task["id"])
-
-        print(f"[编译验证] 检查任务 {exec_task['id']} ({exec_task['title']})...")
-        print(f"       工具: {build_name}，目录: {project_dir}")
-
-        try:
-            result = subprocess.run(
-                build_cmd,
-                cwd=str(project_dir),
-                capture_output=True, text=True,
-                timeout=300
-            )
-        except Exception as e:
-            print(f"       ✗ 编译命令执行失败: {e}")
-            all_ok = False
-            acted += 1
-            _create_build_fix_task(board, exec_task, str(e), build_name, tasks, state)
-            continue
-
-        if result.returncode == 0:
-            print(f"       ✓ 编译通过")
-        else:
-            # 编译失败，提取错误信息（取最后 30 行）
-            # 合并 stdout 和 stderr，有些工具往 stdout 打错误
-            output = (result.stderr + "\n" + result.stdout).strip()
-            error_lines = output.split("\n")[-30:]
-            error_msg = "\n".join(error_lines)
-            print(f"       ✗ 编译失败，创建编译修复任务")
-            all_ok = False
-            acted += 1
-            _create_build_fix_task(board, exec_task, error_msg, build_name, tasks, state)
-
-    return all_ok, acted
-
-
-def _create_build_fix_task(board, exec_task, error_msg, build_name, tasks, state):
-    """编译失败 → 创建编译修复任务并重新走修复流程
-
-    只 link 到和这个修复执行有直接依赖关系的 auditor（即 auditor 依赖这个 exec_task），
-    不能 link 到所有 blocked auditor（会把无关历史任务的 auditor 也扯上）。
-    """
-    # 找依赖这个修复执行任务的 blocked auditor（auditor 是 exec_task 的子任务）
-    # 即 auditor 的 parents 里包含 exec_task.id
-    linked_auditors = []
-    for t in tasks:
-        if t["assignee"] == "auditor" and t["status"] == "blocked":
-            deps = get_task_deps(board, t["id"])
-            if exec_task["id"] in deps:
-                linked_auditors.append(t)
-
-    fix_title = f"编译修复：{exec_task['title'].replace('修复执行：', '')}"
-
-    # 检查是否已有同名任务
-    existing = [t for t in tasks if t["title"] == fix_title]
-    if existing:
-        return
-
-    build_cmd_hint = {
-        "Gradle (Android debug)": "./gradlew assembleDebug",
-        "Gradle (Kotlin DSL)": "gradle assembleDebug",
-        "Gradle (Groovy DSL)": "gradle build",
-        "Cargo (Rust)": "cargo build",
-        "Go build": "go build ./...",
-        "Make": "make",
-        "CMake": "mkdir -p build && cd build && cmake .. && make",
-        "npm build": "npm run build",
-        "Python syntax check": "python -m py_compile **/*.py",
-    }.get(build_name, "<构建命令>")
-
-    fix_id = create_task(
-        board, fix_title,
-        assignee="builder",
-        body=f"编译失败（{build_name}），需要修复。\n\n"
-             f"**错误输出（最后30行）：**\n```\n{error_msg[:2000]}\n```\n\n"
-             f"请修复所有编译错误，确保 `{build_cmd_hint}` 成功。",
-        priority=10
-    )
-
-    if fix_id:
-        # 链接到对应的 auditor 任务（auditor 等编译修复完成才能复审）
-        for auditor in linked_auditors:
-            link_tasks(board, fix_id, auditor["id"])
-
-        print(f"       已创建编译修复任务: {fix_id}（关联 {len(linked_auditors)} 个 auditor）")
-    else:
-        print(f"       ✗ 创建编译修复任务失败")
-
-
-def check_auto_unblock(board, tasks, state, build_check_enabled=False):
+def check_auto_unblock(board, tasks, state):
     """
     检测到 builder 修复执行 done + 对应的 auditor 还 blocked
-    → 如果启用了编译验证，先编译验证；通过后自动 unblock auditor，进入复审
+    → 自动 unblock auditor，进入复审
 
     背景：kanban dispatcher 不会自动 unblock blocked 任务（即使父依赖都 done）。
     blocked 是主动阻塞状态，需要显式 unblock。
@@ -560,27 +366,18 @@ def check_auto_unblock(board, tasks, state, build_check_enabled=False):
         if not all_deps_done or not deps:
             continue
 
-        # 如果启用了编译验证，先做编译验证
-        if build_check_enabled:
-            build_ok, _ = run_build_check(board, tasks, state)
-            if not build_ok:
-                # 编译失败，已经创建了修复任务，先不 unblock
-                print(f"[复审] {auditor['id']} 编译未通过，暂缓 unblock（等编译修复任务完成）")
-                continue
-
         # 所有修复都完成 → 自动 unblock 进入复审
         print(f"[复审] builder 修复全部完成，自动 unblock auditor 任务: {auditor['id']}")
         unblock_task(board, auditor["id"], "watchdog: 所有修复执行任务已完成，自动进入复审")
         comment_task(board, auditor["id"],
-                     "Watchdog 自动触发复审：所有修复执行任务已完成，请重新审计。"
-                     + ("（编译验证已通过）" if build_check_enabled else ""))
+                     "Watchdog 自动触发复审：所有修复执行任务已完成，请重新审计。")
         state["unblocked_auditor_ids"].append(auditor["id"])
         unblocked += 1
 
     return unblocked
 
 
-# ========== 功能 3：完成汇报 ==========
+# ========== 功能 4：完成汇报 ==========
 
 def check_completion(board, tasks, state):
     """
@@ -629,30 +426,16 @@ def send_notification(title, body):
 
 # ========== 主流程 ==========
 
-def run_check(board, build_check_enabled=False):
+def run_check(board):
     """执行一次检查"""
     state = load_state(board)
     # 兼容旧状态文件：补齐缺失的字段
     state.setdefault("unblocked_plan_ids", [])
     state.setdefault("bridged_plan_ids", [])
     state.setdefault("unblocked_auditor_ids", [])
-    state.setdefault("build_checked_exec_ids", [])
     state.setdefault("completed_tasks", [])
     state.setdefault("notified_completion", False)
     tasks = list_tasks(board)
-
-    # 首次运行 baseline：把当前所有已完成的修复执行任务标记为"已检查"
-    # 避免回溯历史任务（历史任务完成时的代码状态和现在不一样，编译验证无意义）
-    if not state.get("_baseline_done"):
-        history_exec = [t["id"] for t in tasks
-                        if t["assignee"] == "builder"
-                        and "修复执行" in t["title"]
-                        and t["status"] == "done"
-                        and t["id"] not in state["build_checked_exec_ids"]]
-        if history_exec:
-            state["build_checked_exec_ids"].extend(history_exec)
-            print(f"[初始化] 标记 {len(history_exec)} 个历史修复执行任务为已检查")
-        state["_baseline_done"] = True
 
     if not tasks:
         print(f"[INFO] 看板 {board} 无任务")
@@ -665,10 +448,10 @@ def run_check(board, build_check_enabled=False):
     # 2. 返工桥接：修复方案完成 → 创建 builder 修复执行
     bridged = check_repair_bridge(board, tasks, state)
 
-    # 2B. 修复完成自动复审：builder 修复执行 done → auditor unblock
-    auto_unblocked = check_auto_unblock(board, tasks, state, build_check_enabled)
+    # 3. 自动复审：builder 修复执行 done → auditor unblock
+    auto_unblocked = check_auto_unblock(board, tasks, state)
 
-    # 3. 完成汇报：全部 done → 通知
+    # 4. 完成汇报：全部 done → 通知
     completed = check_completion(board, tasks, state)
 
     save_state(board, state)
@@ -682,28 +465,22 @@ def main():
     parser.add_argument("--board", required=True, help="看板 slug")
     parser.add_argument("--daemon", action="store_true", help="守护进程模式")
     parser.add_argument("--interval", type=int, default=60, help="守护模式间隔（秒）")
-    parser.add_argument("--enable-build-check", action="store_true",
-                        help="启用编译前置验证（实验性功能：修复执行 done 后自动跑构建命令）")
     args = parser.parse_args()
-
-    # 全局配置
-    BUILD_CHECK_ENABLED = args.enable_build_check
 
     if args.daemon:
         print(f"🐶 Kanban Watchdog 启动")
         print(f"   看板: {args.board}")
         print(f"   间隔: {args.interval}s")
-        print(f"   编译验证: {'开启（实验性）' if BUILD_CHECK_ENABLED else '关闭'}")
         print(f"   状态: {STATE_DIR / args.board}.json")
         print()
         while True:
             try:
-                run_check(args.board, BUILD_CHECK_ENABLED)
+                run_check(args.board)
             except Exception as e:
                 print(f"[ERROR] {e}", file=sys.stderr)
             time.sleep(args.interval)
     else:
-        run_check(args.board, BUILD_CHECK_ENABLED)
+        run_check(args.board)
 
 
 if __name__ == "__main__":

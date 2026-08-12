@@ -49,12 +49,11 @@ mkdir -p "$LOG_DIR"
 if crontab -l 2>/dev/null | grep -q "kanban_watchdog.*--board.*$SLUG"; then
     echo "（$SLUG 的 watchdog 已存在，跳过）"
 else
-    # 添加 cron 条目（每分钟跑一次，默认不启用编译验证）
+    # 添加 cron 条目（每分钟跑一次）
     (crontab -l 2>/dev/null | grep -v "kanban_watchdog.*--board.*$SLUG"; \
      echo "* * * * * /usr/bin/python3 '$WATCHDOG_SCRIPT' --board '$SLUG' >> '$LOG_DIR/$SLUG.log' 2>&1") \
     | crontab -
     echo "✅ Watchdog 已部署（每分钟检查，cron 模式）"
-    echo "   💡 如需启用编译前置验证（实验性），在 cron 命令末尾加 --enable-build-check"
 fi
 
 echo ""

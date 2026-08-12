@@ -122,42 +122,23 @@ hermes kanban promote <first_task_id>
 
 ## Compile-Verification Backtracking Bug
 
+> ⚠️ **历史参考**：编译前置验证功能已在 v1.5.0 移除（过于复杂，易引入新 bug）。以下记录仅作经验保留。
+
 When compile-verification was added (v1.3.0), watchdog would re-compile **all historical** repair-execution tasks on first run, including ones from prior rounds whose code state no longer matches the current codebase. This created false-negative compile failures and spawned spurious "编译修复" tasks.
 
-**Fix** (v1.4.0+): `run_check()` establishes a baseline on first run — all currently-done repair-execution tasks are immediately marked as "already checked" so they're never re-verified:
-
-```python
-if not state.get("_baseline_done"):
-    history_exec = [t["id"] for t in tasks
-                    if t["assignee"] == "builder"
-                    and "修复执行" in t["title"]
-                    and t["status"] == "done"
-                    and t["id"] not in state["build_checked_exec_ids"]]
-    if history_exec:
-        state["build_checked_exec_ids"].extend(history_exec)
-    state["_baseline_done"] = True
-```
+**教训**：任何有状态的脚本，首次部署时必须考虑历史数据基线——只处理部署之后新产生的任务，不回溯历史。
 
 ## Wrong Auditor Linking Bug
 
+> ⚠️ **历史参考**：编译前置验证功能已在 v1.5.0 移除。以下记录仅作经验保留。
+
 When compile-verification failed, `_create_build_fix_task()` linked the new "编译修复" task to **all** blocked auditor tasks, regardless of whether they were on the same dependency chain. This would add the new compile-fix task as a parent of unrelated auditors, blocking them permanently.
 
-**Fix** (v1.4.0+): Only link to blocked auditors whose `parents` list contains the repair-execution task that triggered the compile failure:
-
-```python
-linked_auditors = []
-for t in tasks:
-    if t["assignee"] == "auditor" and t["status"] == "blocked":
-        deps = get_task_deps(board, t["id"])
-        if exec_task["id"] in deps:
-            linked_auditors.append(t)
-```
+**教训**：跨任务关联时，必须通过依赖关系追溯（auditor 的 parents 是否包含触发任务的 ID），不能盲目关联所有同角色任务。
 
 ## Full Prevention Checklist
 
-- [ ] Watchdog v1.4.0+ deployed (`get_task_deps` parses `parents:` format)
+- [ ] Watchdog v1.5.0+ deployed (`get_task_deps` parses `parents:` format)
 - [ ] `run_check()` has `setdefault()` for all state fields
 - [ ] `check_blocked_start()` does unlink before promote
-- [ ] `_create_build_fix_task()` only links to same-chain auditors
-- [ ] `run_check()` establishes baseline on first run (no backtracking)
 - [ ] Cron already deployed: `crontab -l | grep kanban_watchdog`
