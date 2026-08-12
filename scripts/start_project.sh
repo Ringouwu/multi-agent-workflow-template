@@ -40,7 +40,7 @@ T4=$(hermes kanban create "代码审计" --assignee auditor --parent "$T3" --pri
     --workspace "dir:$WORKDIR" --json | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "  T4 代码审计: $T4"
 
-echo "=== 4. 启动 Watchdog（返工桥接 + 完成通知） ==="
+echo "=== 4. 启动 Watchdog（四大功能：阻塞启动+返工桥接+自动复审+完成通知） ==="
 WATCHDOG_SCRIPT="$(cd "$(dirname "$0")" && pwd)/kanban_watchdog.py"
 LOG_DIR="$HOME/.hermes/kanban-watchdog"
 mkdir -p "$LOG_DIR"
@@ -49,11 +49,12 @@ mkdir -p "$LOG_DIR"
 if crontab -l 2>/dev/null | grep -q "kanban_watchdog.*--board.*$SLUG"; then
     echo "（$SLUG 的 watchdog 已存在，跳过）"
 else
-    # 添加 cron 条目（每分钟跑一次）
+    # 添加 cron 条目（每分钟跑一次，默认不启用编译验证）
     (crontab -l 2>/dev/null | grep -v "kanban_watchdog.*--board.*$SLUG"; \
      echo "* * * * * /usr/bin/python3 '$WATCHDOG_SCRIPT' --board '$SLUG' >> '$LOG_DIR/$SLUG.log' 2>&1") \
     | crontab -
     echo "✅ Watchdog 已部署（每分钟检查，cron 模式）"
+    echo "   💡 如需启用编译前置验证（实验性），在 cron 命令末尾加 --enable-build-check"
 fi
 
 echo ""

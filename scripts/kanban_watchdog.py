@@ -2,15 +2,17 @@
 """
 Kanban Watchdog — 多 Agent 流水线守护脚本
 
-五个核心功能：
+四大核心功能（稳定，默认启用）：
 1. 阻塞启动：auditor blocked + 有修复方案任务依赖它 → 自动解绑并启动修复方案
 2. 返工桥接：修复方案 done → 自动创建 builder 修复执行任务并链接到 auditor
-3. 编译前置验证：修复执行 done → 自动跑构建命令，失败直接建修复任务（不浪费 auditor token）
-4. 自动复审：修复执行 done + 编译通过 → 自动 unblock auditor 进入复审
-5. 完成汇报：看板全部 done → 发桌面通知
+3. 自动复审：修复执行 done → 自动 unblock auditor 进入复审
+4. 完成汇报：看板全部 done → 发桌面通知
+
+可选功能（实验性，需手动开启）：
+A. 编译前置验证：修复执行 done → 自动跑构建命令，失败直接建修复任务
 
 用法:
-    python3 kanban_watchdog.py --board <board-slug> [--daemon] [--interval 60]
+    python3 kanban_watchdog.py --board <board-slug> [--daemon] [--interval 60] [--enable-build-check]
 
 设计：纯脚本，不花 LLM 钱。
 - 方式 A（cron）：每分钟跑一次，--once（默认）
@@ -523,10 +525,10 @@ def _create_build_fix_task(board, exec_task, error_msg, build_name, tasks, state
         print(f"       ✗ 创建编译修复任务失败")
 
 
-def check_auto_unblock(board, tasks, state):
+def check_auto_unblock(board, tasks, state, build_check_enabled=False):
     """
     检测到 builder 修复执行 done + 对应的 auditor 还 blocked
-    → 先编译验证 → 通过则自动 unblock auditor，进入复审
+    → 如果启用了编译验证，先编译验证；通过后自动 unblock auditor，进入复审
 
     背景：kanban dispatcher 不会自动 unblock blocked 任务（即使父依赖都 done）。
     blocked 是主动阻塞状态，需要显式 unblock。
@@ -558,19 +560,20 @@ def check_auto_unblock(board, tasks, state):
         if not all_deps_done or not deps:
             continue
 
-        # 先做编译验证（如果还没做过）
-        build_ok, _ = run_build_check(board, tasks, state)
+        # 如果启用了编译验证，先做编译验证
+        if build_check_enabled:
+            build_ok, _ = run_build_check(board, tasks, state)
+            if not build_ok:
+                # 编译失败，已经创建了修复任务，先不 unblock
+                print(f"[复审] {auditor['id']} 编译未通过，暂缓 unblock（等编译修复任务完成）")
+                continue
 
-        if not build_ok:
-            # 编译失败，已经创建了修复任务，先不 unblock
-            print(f"[复审] {auditor['id']} 编译未通过，暂缓 unblock（等编译修复任务完成）")
-            continue
-
-        # 所有修复都完成 + 编译通过 → 自动 unblock 进入复审
-        print(f"[复审] builder 修复全部完成且编译通过，自动 unblock auditor 任务: {auditor['id']}")
-        unblock_task(board, auditor["id"], "watchdog: 所有修复执行任务已完成且编译验证通过，自动进入复审")
+        # 所有修复都完成 → 自动 unblock 进入复审
+        print(f"[复审] builder 修复全部完成，自动 unblock auditor 任务: {auditor['id']}")
+        unblock_task(board, auditor["id"], "watchdog: 所有修复执行任务已完成，自动进入复审")
         comment_task(board, auditor["id"],
-                     "Watchdog 自动触发复审：所有修复执行任务已完成，且编译验证通过。请重新审计。")
+                     "Watchdog 自动触发复审：所有修复执行任务已完成，请重新审计。"
+                     + ("（编译验证已通过）" if build_check_enabled else ""))
         state["unblocked_auditor_ids"].append(auditor["id"])
         unblocked += 1
 
@@ -626,7 +629,7 @@ def send_notification(title, body):
 
 # ========== 主流程 ==========
 
-def run_check(board):
+def run_check(board, build_check_enabled=False):
     """执行一次检查"""
     state = load_state(board)
     # 兼容旧状态文件：补齐缺失的字段
@@ -663,7 +666,7 @@ def run_check(board):
     bridged = check_repair_bridge(board, tasks, state)
 
     # 2B. 修复完成自动复审：builder 修复执行 done → auditor unblock
-    auto_unblocked = check_auto_unblock(board, tasks, state)
+    auto_unblocked = check_auto_unblock(board, tasks, state, build_check_enabled)
 
     # 3. 完成汇报：全部 done → 通知
     completed = check_completion(board, tasks, state)
@@ -679,22 +682,28 @@ def main():
     parser.add_argument("--board", required=True, help="看板 slug")
     parser.add_argument("--daemon", action="store_true", help="守护进程模式")
     parser.add_argument("--interval", type=int, default=60, help="守护模式间隔（秒）")
+    parser.add_argument("--enable-build-check", action="store_true",
+                        help="启用编译前置验证（实验性功能：修复执行 done 后自动跑构建命令）")
     args = parser.parse_args()
+
+    # 全局配置
+    BUILD_CHECK_ENABLED = args.enable_build_check
 
     if args.daemon:
         print(f"🐶 Kanban Watchdog 启动")
         print(f"   看板: {args.board}")
         print(f"   间隔: {args.interval}s")
+        print(f"   编译验证: {'开启（实验性）' if BUILD_CHECK_ENABLED else '关闭'}")
         print(f"   状态: {STATE_DIR / args.board}.json")
         print()
         while True:
             try:
-                run_check(args.board)
+                run_check(args.board, BUILD_CHECK_ENABLED)
             except Exception as e:
                 print(f"[ERROR] {e}", file=sys.stderr)
             time.sleep(args.interval)
     else:
-        run_check(args.board)
+        run_check(args.board, BUILD_CHECK_ENABLED)
 
 
 if __name__ == "__main__":
