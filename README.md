@@ -215,8 +215,21 @@ multi-agent-workflow-template/
 ├── scripts/
 │   ├── start_project.sh   # 一键启动新项目（自动部署 watchdog cron）
 │   └── kanban_watchdog.py # 看板守护：阻塞启动 + 返工桥接 + 自动复审 + 完成通知（编译验证可选）
-└── docs/                  # 流程细节文档
+└── docs/
+    ├── kanban-blocked-repair-deadlock.md   # 返工死锁完整调试复盘（7 个 bug + 预防清单）
+    └── android-compose-build-pitfalls.md   # Android Compose 构建踩坑（领域特定参考）
 ```
+
+## 经验复盘（docs/）
+
+本仓库的 `docs/` 目录沉淀了流水线实际运行中踩过的坑，是**从实战里长出来的文档**：
+
+| 文档 | 内容 | 通用性 |
+|------|------|--------|
+| `kanban-blocked-repair-deadlock.md` | 返工闭环死锁的完整复盘：7 个根因（get_task_deps 格式解析、promote--force 不足、状态文件锁定、KeyError、重复任务、编译回溯、错误关联）+ 每条的手动恢复步骤 + 预防清单 | ✅ 跨领域通用 |
+| `android-compose-build-pitfalls.md` | Android Compose BOM 2024.02 的具体 API 不兼容 + Moshi codegen 陷阱 + "auditor 通过≠能编译"案例 | ⚠️ Android 特定 |
+
+> 核心教训：**LLM 审计会放水，编译器不会**。代码类项目无论用什么流程，最终必须以"能否构建通过"为准。
 
 ## License
 
