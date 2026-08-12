@@ -9,7 +9,7 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Orchestrator (主对话/编排者)                             │
-│  扮演 PM 做需求访谈 → 写 PRD → 完成 T1 → 监控汇报          │
+│  扮演 PM 做需求访谈 → 写 PRD → 完成 T1 → 接收完成通知        │
 └──────────────────────────┬──────────────────────────────┘
                            │ 触发依赖引擎
                            ▼
@@ -19,10 +19,17 @@
 └──────────┘   └──────────┘   └──────────┘   └────┬─────┘
                                                   │ 不通过
                                                   ▼
-                    ┌────────────── 返工闭环（≤3轮）─────────────┐
-                    │  auditor block + 建修复方案 → architect     │
-                    │  → 判真伪/出fix-plan → builder → 复审        │
-                    └──────────────────────────────────────────┘
+                    ┌────────────── 返工闭环（≤3轮）──────────────┐
+                    │  auditor block + 建修复方案 → architect      │
+                    │  → 出 fix-plan → [watchdog 自动桥接]         │
+                    │  → builder 修复执行 → auditor 复审           │
+                    │                                             │
+                    │  ⚠️ 原生流水线的坑：方案做完了不会自动调      │
+                    │     builder，需要 watchdog 脚本补上这一环     │
+                    └───────────────────────────────────────────┘
+                                                  │
+                                                  ▼ 全部完成
+                                    📩 自动桌面通知（watchdog）
 ```
 
 ## 角色（Profile）
@@ -52,17 +59,29 @@
 
 ### 2. 审计自动返工闭环（Auditor 不通过时）
 
+> ⚠️ **重要**：原生 kanban 流水线在返工环节有断链——auditor 创建「修复方案」任务给 architect 后，architect 完成方案时**不会自动触发 builder 去执行修复**。需要 `scripts/kanban_watchdog.py` 补上这一环（见下文「看板守护进程」）。
+
 审计发现 P0/P1 问题时：
 
 ```
-kanban_comment → kanban_block → kanban_create("修复方案", assignee=architect, parent=审计任务)
+auditor:
+  kanban_comment → kanban_block → kanban_create("修复方案", assignee=architect)
                                                     ↓
                               architect 判真伪（排除误报）→ docs/fix-plan.md → complete
                                                     ↓
-                              builder 按计划修复 → auditor 复审
+                              🐶 watchdog 检测到方案完成 → 自动创建 builder 修复执行任务
+                                                    ↓
+                              builder 按计划修复 → complete → auditor 自动复审
                                                     ↓
                               不通过再循环；第 3 轮仍不过 → block 升级人工
 ```
+
+Watchdog 桥接逻辑（自动执行，不花 LLM 钱）：
+1. 检测到 auditor 任务 blocked
+2. 检测到标题含「修复方案」的 architect 任务状态为 done
+3. 创建同名「修复执行」任务给 builder
+4. 链接依赖：修复方案 → 修复执行 → 审计任务
+5. builder 完成后，审计任务自动 promoted 进入复审
 
 ### 3. 防误判：字节级验证
 
@@ -122,9 +141,28 @@ hermes kanban complete $T1 --result "PRD 已完成，见 docs/PRD.md"
 echo "<YOUR_API_KEY_ENV>=sk-..." >> ~/.hermes/profiles/<role>/.env
 ```
 
-### 看板健康检查（可选）
+### 看板守护进程（推荐，必加）
 
-`scripts/kanban_watchdog.py` 定时检查看板：blocked 超 30 分钟 / 审计不通过但无修复任务跟进 → 告警。用 cron 每 30 分钟跑（--no-agent 模式，不花 LLM 费用）。
+`scripts/kanban_watchdog.py` 是流水线的**必要补充**，解决了两个原生问题：
+
+| 功能 | 解决什么问题 |
+|---|---|
+| 🔗 **返工桥接** | auditor 不通过 → architect 出方案 → [自动建 builder 修复任务] → 复审。原生流水线这里会断链。 |
+| ✅ **完成汇报** | 看板全部 done 时自动发桌面通知，不用手动来问「做完了吗」。 |
+| 🚨 **健康检查** | blocked 超 30 分钟 / 审计不通过但无修复跟进 → 告警（兜底）。 |
+
+**部署方式（cron，推荐）**：
+```bash
+# 每个看板加一条 cron，每分钟跑一次（用完即走，几乎不占资源）
+* * * * * /usr/bin/python3 /path/to/scripts/kanban_watchdog.py --board <your-board> >> ~/.hermes/kanban-watchdog/cron.log 2>&1
+```
+
+**守护进程模式**（不推荐，cron 更稳）：
+```bash
+python3 scripts/kanban_watchdog.py --board <your-board> --daemon --interval 60
+```
+
+> 资源占用（cron 模式）：内存 ~10MB × 每次运行 <1 秒，平时 0 占用。硬盘可忽略。
 
 ## 按项目定制
 
@@ -145,7 +183,7 @@ multi-agent-workflow-template/
 │   └── examples/          # 具体项目示例（嵌入式等）
 ├── scripts/
 │   ├── start_project.sh   # 一键启动新项目
-│   └── kanban_watchdog.py # 看板健康检查
+│   └── kanban_watchdog.py # 看板守护：返工桥接 + 完成通知 + 健康检查
 └── docs/                  # 流程细节文档
 ```
 
