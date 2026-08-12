@@ -91,6 +91,38 @@ Watchdog 桥接逻辑（自动执行，不花 LLM 钱）：
 
 **涉及认证头/密钥的判断，用字节级验证**（读原始字节查 `%s` / `\r\n`），不要只信显示内容。
 
+### 4. Auditor 防放水（双重保障）
+
+**问题**：Auditor 复审时可能只读代码不编译，明明编译失败却说"全部通过"。
+- 根因：静态读代码发现不了依赖配置错误、API 版本不兼容等编译期问题
+- 实际案例：v2 复审 auditor 说"3 个问题全是误报"，但 gradle 编译失败
+
+**解决（三重保障）**：
+
+| 层级 | 措施 | 谁来做 |
+|------|------|--------|
+| 流程层 | 编译前置验证：watchdog 在送 auditor 复审前先跑构建，失败直接打回 builder | watchdog 脚本 |
+| 角色层 | auditor profile 加 system prompt，明确要求「先编译再审计，编译失败直接 P0」 | 编排者配置 |
+| 最终门 | 流水线全部完成后，Orchestrator 自己再跑一次编译验证 | 编排者 |
+
+**Auditor system prompt 模板**（放在 `~/.hermes/profiles/auditor/system_prompt.md`）：
+
+```markdown
+# Auditor 角色规则
+
+1. **编译是底线**：审计前必须先跑构建命令。
+   - Android/Kotlin: `./gradlew assembleDebug`
+   - Python: `python -m py_compile` 或 pytest
+   - Rust: `cargo build`
+   - 其他: 找到对应编译/检查命令
+
+2. **编译失败 = P0**：只要编译不通过，直接判 P0，不需要完整审计。
+
+3. **不要假设**：不要凭"代码看起来没问题"就通过，必须实际验证。
+
+4. **实事求是**：builder 说"已修复"不代表真修了，自己验证。
+```
+
 ## 快速开始（新项目）
 
 ### 方式一：脚本一键启动
@@ -143,13 +175,19 @@ echo "<YOUR_API_KEY_ENV>=sk-..." >> ~/.hermes/profiles/<role>/.env
 
 ### 看板守护进程（推荐，必加）
 
-`scripts/kanban_watchdog.py` 是流水线的**必要补充**，解决了两个原生问题：
+`scripts/kanban_watchdog.py` 是流水线的**必要补充**，解决了多个原生 kanban 的断链问题：
 
 | 功能 | 解决什么问题 |
 |---|---|
-| 🔗 **返工桥接** | auditor 不通过 → architect 出方案 → [自动建 builder 修复任务] → 复审。原生流水线这里会断链。 |
+| 🚀 **阻塞启动** | auditor block 时创建的修复方案任务，会把 auditor 设为父依赖 → 子任务永远无法 promote（父任务是 blocked 不是 done）。watchdog 自动解绑 + 启动。 |
+| 🔗 **返工桥接** | architect 修复方案 done 后，不会自动触发 builder 执行。watchdog 自动创建修复执行任务并链接。 |
+| 🔨 **编译前置验证** | auditor 复审可能放水（只读代码不编译，明明编译失败却说通过）。watchdog 在送复审前先跑构建命令，失败直接打回 builder，省 LLM token。 |
+| 🔄 **自动复审** | builder 修复执行 done 后，blocked 的 auditor 不会自动 unblock（即使父依赖全 done）。watchdog 检测到后自动 unblock 进入复审。 |
 | ✅ **完成汇报** | 看板全部 done 时自动发桌面通知，不用手动来问「做完了吗」。 |
-| 🚨 **健康检查** | blocked 超 30 分钟 / 审计不通过但无修复跟进 → 告警（兜底）。 |
+
+**构建工具自动检测**（编译前置验证支持）：
+Gradle (Android/JVM)、Cargo (Rust)、Go、Make、CMake、npm、Python 语法检查。
+未检测到构建工具的项目自动跳过，不阻塞。
 
 **部署方式（cron，推荐）**：
 ```bash
