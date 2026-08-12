@@ -614,6 +614,13 @@ def send_notification(title, body):
 def run_check(board):
     """执行一次检查"""
     state = load_state(board)
+    # 兼容旧状态文件：补齐缺失的字段
+    state.setdefault("unblocked_plan_ids", [])
+    state.setdefault("bridged_plan_ids", [])
+    state.setdefault("unblocked_auditor_ids", [])
+    state.setdefault("build_checked_exec_ids", [])
+    state.setdefault("completed_tasks", [])
+    state.setdefault("notified_completion", False)
     tasks = list_tasks(board)
 
     if not tasks:
