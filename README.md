@@ -166,7 +166,7 @@ echo "<YOUR_API_KEY_ENV>=sk-..." >> ~/.hermes/profiles/<role>/.env
 |---|---|
 | 🚀 **阻塞启动** | auditor block 时创建的修复方案任务，会把 auditor 设为父依赖 → 子任务永远无法 promote（父任务是 blocked 不是 done）。watchdog 自动解绑 + 启动。 |
 | 🔗 **返工桥接** | architect 修复方案 done 后，不会自动触发 builder 执行。watchdog 自动创建修复执行任务并链接。 |
-| 🔄 **自动复审** | builder 修复执行 done 后，blocked 的 auditor 不会自动 unblock（即使父依赖全 done）。watchdog 检测到后自动 unblock 进入复审。 |
+| 🔄 **自动复审** | builder 修复执行 done 后，blocked 的 auditor 不会自动 unblock（即使父依赖全 done）。watchdog 检测到后自动 unblock 进入复审。**v1.6.0 防过早触发**：只有当 auditor 的父依赖里存在 done 的「修复执行」任务时才 unblock，避免修复链未建立时提前放行导致复审空转。 |
 | ✅ **完成汇报** | 看板全部 done 时自动发桌面通知，不用手动来问「做完了吗」。 |
 
 **部署方式（cron，推荐）**：

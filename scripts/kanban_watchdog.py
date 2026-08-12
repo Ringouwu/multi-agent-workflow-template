@@ -338,6 +338,12 @@ def check_auto_unblock(board, tasks, state):
 
     背景：kanban dispatcher 不会自动 unblock blocked 任务（即使父依赖都 done）。
     blocked 是主动阻塞状态，需要显式 unblock。
+
+    防过早触发（v1.6.0）：auditor 首轮 block 时，父依赖里可能只有原始任务（如
+    "代码实现"）已 done，但修复链（修复方案→修复执行）还没建立。此时若按
+    "所有父依赖 done" 直接 unblock，auditor 复审会看到未修复的代码再次 block，
+    形成空转循环。修复：只有当 auditor 的父依赖里存在 **done 的修复执行任务**
+    时才 unblock——即修复确实被执行完，才放行复审。
     """
     if "unblocked_auditor_ids" not in state:
         state["unblocked_auditor_ids"] = []
@@ -356,21 +362,35 @@ def check_auto_unblock(board, tasks, state):
         if not deps:
             continue
 
-        # 检查所有父任务是否都 done 了
         dep_tasks = {t["id"]: t for t in tasks}
+
+        # 关键判断：父依赖里必须存在 done 的「修复执行」任务
+        # （说明修复确实执行完了，可以复审）
+        # 首轮 block 后修复链未建立时，父依赖里没有修复执行任务 → 不 unblock
+        repair_execs_done = [
+            dep_id for dep_id in deps
+            if dep_id in dep_tasks
+            and "修复执行" in dep_tasks[dep_id]["title"]
+            and dep_tasks[dep_id]["status"] == "done"
+        ]
+
+        if not repair_execs_done:
+            # 没有已完成修复执行任务 → 不触发（可能是首轮 block 等修复方案，
+            # 或修复执行还在 running）
+            continue
+
+        # 所有父依赖都 done（含修复执行 done）→ 自动 unblock 进入复审
         all_deps_done = all(
             dep_id in dep_tasks and dep_tasks[dep_id]["status"] == "done"
             for dep_id in deps
         )
-
-        if not all_deps_done or not deps:
+        if not all_deps_done:
             continue
 
-        # 所有修复都完成 → 自动 unblock 进入复审
-        print(f"[复审] builder 修复全部完成，自动 unblock auditor 任务: {auditor['id']}")
-        unblock_task(board, auditor["id"], "watchdog: 所有修复执行任务已完成，自动进入复审")
+        print(f"[复审] builder 修复执行完成，自动 unblock auditor 任务: {auditor['id']}")
+        unblock_task(board, auditor["id"], "watchdog: 修复执行任务已完成，自动进入复审")
         comment_task(board, auditor["id"],
-                     "Watchdog 自动触发复审：所有修复执行任务已完成，请重新审计。")
+                     "Watchdog 自动触发复审：修复执行任务已完成，请重新审计。")
         state["unblocked_auditor_ids"].append(auditor["id"])
         unblocked += 1
 
